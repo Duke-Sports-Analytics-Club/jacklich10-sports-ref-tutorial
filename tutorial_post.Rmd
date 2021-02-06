@@ -1,0 +1,459 @@
+---
+title: "Duke Sports Analtyics: An Initial Exploration of Publicly Available College Basketball Data"
+description: |
+  An introduction to using the publicly available sports-reference.com to explore Duke Men's Basketball statistics
+author: 
+ - name: "[Jack Lichtenstein](https://twitter.com/jacklich10)"
+date: "`r Sys.Date()`"
+output:
+  # pdf_document: default
+  html_document:
+    theme: readable
+    highlight: tango
+    toc: true
+    toc_depth: 2
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, 
+                      echo = TRUE, dpi = 300, cache.lazy = FALSE,
+                      tidy = "styler", fig.width = 8, fig.height = 5)
+```
+
+```{r load libraries, include=FALSE, echo=FALSE}
+library(tidyverse)
+ggplot2::theme_set(ggplot2::theme_bw() +
+                     ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 28/ggplot2::.pt, hjust = 0),
+                                    plot.subtitle = ggplot2::element_text(face = "italic", size = 24/ggplot2::.pt),
+                                    plot.caption = ggplot2::element_text(face = "italic", size = 20/ggplot2::.pt),
+                                    strip.background = ggplot2::element_rect(color = "black", fill = "#C0C0C0", size = 3, linetype = "blank"),
+                                    strip.text = ggplot2::element_text(face = "bold", size = 24/ggplot2::.pt),
+                                    panel.grid.minor = ggplot2::element_blank(),
+                                    panel.border = ggplot2::element_blank(),
+                                    axis.ticks = ggplot2::element_blank(),
+                                    axis.text = ggplot2::element_text(size = 24/ggplot2::.pt),
+                                    axis.title = ggplot2::element_text(face = "bold", size = 26/ggplot2::.pt),
+                                    legend.title = ggplot2::element_text(size = 26/ggplot2::.pt),
+                                    legend.text = ggplot2::element_text(size = 24/ggplot2::.pt)))
+```
+
+# Introduction
+
+The goal of this post is to familiarize R programming beginners with some public sports data sources. Specifically, we will look at scraping [sports-reference.com](sports-reference.com) 's college basketball data and then making some visualizations. Let's get started!
+
+# Scraping sports-reference.com
+
+We are going to be making use of a bunch of R packages, but we will be using     `tidyverse_style()` coding. To begin, let's scrape the Duke basketball [game logs](https://www.sports-reference.com/cbb/schools/duke/2021-schedule.html) off of sports-reference.com using the `rvest` package.
+
+```{r game logs init}
+# find url of website
+url <- "https://www.sports-reference.com/cbb/schools/duke/2021-schedule.html"
+
+xml2::read_html(url) %>% 
+  # grab the tables
+  rvest::html_table(fill = T) 
+```
+
+When we scrape the tables off the site, notice that we actually receive a list of two tables. We are interested in the second table, so we will use `purrr::pluck()` to "pluck" the second table from the list. After some additional cleaning, we are left with the following dataframe from the 2020-21 season:
+
+```{r pluck table}
+xml2::read_html(url) %>% 
+  # grab the tables
+  rvest::html_table(fill = T) %>%
+  # pluck the second table from the list of tables
+  purrr::pluck(2) %>% 
+  # clean column names to snake_case
+  janitor::clean_names() %>%
+  # convert to tibble
+  dplyr::as_tibble() %>% 
+  # grab only what we want
+  dplyr::transmute(game_number = g,
+                   date,
+                   result = x_2,
+                   opponent,
+                   team_score = tm,
+                   opp_score = opp) %>% 
+  # get rid of mid-table headings
+  dplyr::filter(date != "Date", opponent != "Opponent") %>% 
+  # convert to numeric values
+  dplyr::mutate(dplyr::across(c(game_number, team_score, opp_score), 
+                              suppressWarnings(as.numeric)))
+```
+
+What if we wanted data dating all the way back to Coach K's first season? We can make a function for this! Using the workflow above, all we need to do is pass in a url for each season we want data from and extract the same information.
+
+```{r scrape_game_logs}
+# function to pull game logs from sports-reference.com
+scrape_game_logs <- function(url) {
+  xml2::read_html(url) %>% 
+    # grab the tables
+    rvest::html_table(fill = T) %>%
+    # pluck the second table
+    purrr::pluck(2) %>% 
+    # clean column names 
+    janitor::clean_names() %>%
+    # convert to tibble
+    dplyr::as_tibble() %>% 
+    # grab only what we want
+    dplyr::transmute(game_number = g,
+                     date,
+                     result = x_2,
+                     opponent,
+                     team_score = tm,
+                     opp_score = opp) %>% 
+    # get rid of mid-table headings
+    dplyr::filter(date != "Date", opponent != "Opponent") %>% 
+    # convert to numeric values
+    dplyr::mutate(dplyr::across(c(game_number, team_score, opp_score), 
+                                suppressWarnings(as.numeric)))
+}
+```
+
+Next, we will use `purrr::map()` to scrape for all seasons dating back to 1980-81. The `purrr::map()` function allows us to *vectorize* the function we created above, rather than using a for loop, for example. All we need to do is create the url needed for the function we created, and then *map* the function over the urls. You can read more about the `purrr` package and mapping functions [here](https://purrr.tidyverse.org/reference/map.html).
+
+```{r map game logs}
+# dataframe of seasons from 1981-2021
+game_logs <- dplyr::tibble(season_url = 1981:2021,
+                           season = paste0(season_url - 1, "-", stringr::str_sub(season_url, start = 3)),
+                           url = paste0("https://www.sports-reference.com/cbb/schools/duke/", season_url, "-schedule.html")) %>% 
+  dplyr::mutate(data = purrr::map(url, purrr::possibly(scrape_game_logs, otherwise = NA)))
+
+head(game_logs)
+```
+
+Great! Now we have each seasons data nested as a list inside our dataframe. In order to pull the game logs out of the list, we will use the `tidyr::unnest()` function.
+
+```{r unnest game logs}
+game_logs_unnest <- game_logs %>% 
+  # don't need the url anymore
+  dplyr::select(-url, -season_url) %>% 
+  # unnest the data
+  tidyr::unnest(data) %>% 
+  # keep only the games that have completed 
+  dplyr::filter(!is.na(team_score))
+
+head(game_logs_unnest)
+```
+
+At this point, we have scraped the results of all `r scales::comma(nrow(game_logs_unnest))` Duke games in the Coach K era!
+
+# Basic modeling
+
+Let's tackle a simple, yet interesting question through some basic modeling techniques. The simple question is: What if we wanted to predict next season's win percentage from this years data? Let's determine whether the current season win percentage or current season point differential is a better predictor of next season win percentage.
+
+First, we need to group by season and find each seasons win percentage and point differential. Then, we need to compare these values to prior seasons. To do this, we will use `dplyr::lag()`.
+
+```{r lag for model}
+seasons_summarized <- game_logs_unnest %>% 
+  # group by season
+  dplyr::group_by(season) %>% 
+  # summarise relevant stats
+  dplyr::summarise(games = n(),
+                   wins = sum(team_score > opp_score),
+                   win_pct = wins/games,
+                   point_diff = sum(team_score - opp_score)) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::select(season, point_diff, win_pct) %>% 
+  # lag to find previous metrics
+  dplyr::mutate(prev_win_pct = dplyr::lag(win_pct, n = 1),
+                prev_point_diff = dplyr::lag(point_diff, n = 1))
+
+head(seasons_summarized)
+```
+
+Next, we need to "pivot" the dataframe into a "long" format so that we can compare both metrics to next year's win percentage. To do so, we will use `tidyr::pivot_longer()`.
+
+```{r pivot long}
+long <- seasons_summarized %>% 
+  # pivot both metrics to long format
+  tidyr::pivot_longer(cols = c(prev_win_pct, prev_point_diff),
+                      names_to = "predictor",
+                      names_prefix = "prev_") %>% 
+  # make prettier labels
+  dplyr::mutate(predictor = ifelse(predictor == "win_pct",
+                                   "Prior Year Win %", "Prior Year Point Diff"))
+
+head(long)
+```
+
+We have essentially "doubled" the number of observations in the dataframe by pivoting from "wide" to "long". This makes for easier comparisons between prior year win percentage/point differential and next year's win percentage. Let's plot these relationships:
+
+```{r plot pivoted, echo=FALSE, layout="l-page", fig.height=4}
+long %>% 
+  ggplot(aes(value, win_pct)) +
+  geom_smooth(method = "lm") +
+  geom_point() +
+  facet_wrap(~ predictor, scales = "free_x") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Value",
+       y = "Next Year's Win %",
+       caption = "Chart: @jacklich10 | Data: sports-reference.com")
+
+seasons_summarized %>% 
+  # pivot both metrics to long format
+  tidyr::pivot_longer(cols = c(prev_win_pct, prev_point_diff),
+                      names_to = "predictor",
+                      names_prefix = "prev_") %>%
+  tidyr::pivot_longer(cols = c(win_pct, point_diff),
+                      names_to = "response",
+                      values_to = "response_val") %>% 
+  # make prettier labels
+  dplyr::mutate(predictor = ifelse(predictor == "win_pct",
+                                   "Prior Year Win %", "Prior Year Point Diff"),
+                response = ifelse(response == "win_pct",
+                                   "Win %", "Point Diff")) %>% 
+  tidyr::nest(data = c(-predictor, -response)) %>% 
+  dplyr::mutate(lm = purrr::map(data, ~ lm(response_val ~ value, data = .)),
+                glanced = purrr::map(lm, broom::glance)) %>% 
+  tidyr::hoist(glanced, r.squared = "r.squared") %>% 
+  ggplot(aes(predictor, response)) +
+  geom_tile(aes(fill = r.squared)) +
+  geom_text(aes(label = scales::number(r.squared, accuracy = 0.001)),
+            color = "black", fontface = "bold", size = 5) +
+  scale_fill_distiller(palette = "Blues", direction = 1) +
+  theme(legend.position = "none") +
+  labs(title = "Previous year point differential predicts future win percentage better than previous win percentage",
+       subtitle = "Values show R-squared | Duke men's basketball 1980-2021 seasons",
+       x = NULL,
+       y = NULL,
+       caption = "Chart: @jacklich10 | Data: sports-reference.com")
+```
+
+Awesome! So we have found some evidence that prior year's point differential is a better predictor of next year's win percentage than prior year's win percentage! This is a replication of a commonly found idea across many sports.
+
+# Data visualization
+
+Let's make a visualization! One idea I have is to visualize the strength of a Duke team through their cumulative point differential. To find cumulative point differential by season, we need to `dplyr::group_by()` season and use `cumsum()`.
+
+```{r cumulative point diff}
+game_logs_unnest <- game_logs_unnest %>% 
+  # add championship years
+  dplyr::mutate(point_diff = team_score - opp_score,
+                champions = ifelse(season %in% c("1990-91", "1991-92", "2000-01", "2009-10", "2014-15"),
+                                   "Yes", "No")) %>% 
+  dplyr::filter(!is.na(point_diff)) %>% 
+  # group by season and find cumulative point differential by season
+  dplyr::group_by(season) %>% 
+  dplyr::arrange(game_number) %>% 
+  dplyr::mutate(cumulative_pt_diff = dplyr::lag(cumsum(point_diff), default = 0)) %>% 
+  dplyr::ungroup()
+```
+
+```{r plot cumulative point diff, echo=FALSE, layout="l-page", fig.height=5.5, preview=TRUE}
+# plot cumulative point differential for each Duke team in Coach K era
+game_logs_unnest %>% 
+  ggplot(aes(game_number, cumulative_pt_diff, group = season)) +
+  geom_line(aes(color = champions, size = champions, alpha = champions)) +
+  geom_point(data = game_logs_unnest %>% 
+               dplyr::group_by(season) %>% 
+               dplyr::filter(game_number == max(game_number)),
+             aes(color = champions)) +
+  geom_text(data = game_logs_unnest %>% 
+              dplyr::arrange(dplyr::desc(champions)) %>% 
+              dplyr::group_by(season) %>% 
+              dplyr::filter(game_number == max(game_number)),
+            aes(label = season),
+            size = 2.5, fontface = "italic", hjust = -0.2, vjust = -0.2, check_overlap = T) +
+  scale_x_continuous(expand = expansion(mult = c(0.1, 0.15))) +
+  scale_color_manual(values = c("black",
+                                ncaahoopR::ncaa_colors$color_4[ncaahoopR::ncaa_colors$ncaa_name == "Duke"])) +
+  scale_alpha_manual(values = c(0.65, 1)) +
+  scale_size_manual(values = c(0.65, 1.2)) +
+  guides(size = F, alpha = F) +
+  labs(title = "Duke men's basketball cumulative point differentials in the Coach K era",
+       subtitle = "1980-81 through 2020-21 seasons",
+       x = "Game Number",
+       y = "Cumulative Point Differential",
+       color = "National Champions",
+       caption = "Chart: @jacklich10 | Data: sports-reference.com")
+# `r emo::ji("eyes")`
+```
+
+Duke basketball in the Coach K era has been nothing short of dominant. It's also interesting that you can make an argument that Duke's best team (1998-99) didn't win the National Championship. 
+
+# Explore the four factors
+
+Lastly, let's explore the ["four factors"](https://www.basketball-reference.com/about/factors.html) of basketball, coined by Dean Oliver. The four factors include shooting (measured by effective field goal percentage), rebounding, turnovers and free throws. We will construct a similar function to scrape these statistics from sports-reference.com. The function is below:
+
+```{r four factor scrape}
+# we can make this a function to grab from multiple seasons!
+scrape_four_factors <- function(url) {
+  xml2::read_html(url) %>% 
+    # grab the tables
+    rvest::html_table(fill = T) %>%
+    # pluck the first table
+    purrr::pluck(1) %>% 
+    # make the first row the column names
+    janitor::row_to_names(row_number = 1) %>% 
+    # clean column names 
+    janitor::clean_names() %>%
+    # convert to tibble
+    dplyr::as_tibble() %>% 
+    # keep only rows where there is a score
+    dplyr::filter(tm != "", opp_2 != "", opp != "Opp") %>% 
+    # grab only what we need (four factors)
+    dplyr::transmute(date = as.Date(date),
+                     opponent = opp,
+                     team_score = tm,
+                     opp_score = opp_2,
+                     eff_fg_pct = e_fg_percent,
+                     tov_pct = tov_percent,
+                     oreb_pct = orb_percent,
+                     ft_rate = f_tr) %>% 
+    # change values to numeric and on 0-1 scale
+    dplyr::mutate(dplyr::across(c(everything(), -date, -opponent), suppressWarnings(as.numeric)),
+                  dplyr::across(tov_pct:oreb_pct, ~ ./100))
+}
+
+# sports-reference.com has data dating back to 2010-11 season
+four_factors <- dplyr::tibble(season_url = 2011:2021,
+                              season = paste0(season_url - 1, "-", stringr::str_sub(season_url, start = 3)),
+                              url = paste0("https://www.sports-reference.com/cbb/schools/duke/", season_url, "-gamelogs-advanced.html")) %>% 
+  dplyr::mutate(data = purrr::map(url, purrr::possibly(scrape_four_factors, otherwise = NA)))
+
+four_factors_unnest <- four_factors %>% 
+  # don't need the url anymore
+  dplyr::select(-url, -season_url) %>% 
+  # unnest the data
+  tidyr::unnest(data) %>% 
+  dplyr::mutate(result = ifelse(team_score > opp_score, "W", "L"),
+                result = forcats::fct_rev(result))
+
+head(four_factors_unnest)
+```
+
+Great, we now have Duke's offensive four factors since 2010-11 (the first season sports-reference.com has data). Let's do some basic plotting:
+
+```{r plot four factors, echo=FALSE, layout="l-page"}
+# plot some four factors
+four_factors_unnest %>% 
+  ggplot(aes(eff_fg_pct, oreb_pct)) +
+  geom_hline(aes(yintercept = mean(oreb_pct)),
+             lty = 2, color = "black") +
+  geom_vline(aes(xintercept = mean(eff_fg_pct)),
+             lty = 2, color = "black") +
+  geom_point(aes(color = result)) +
+  annotate(geom = "text", x = 0.7, y = 0.65,
+           label = "Duke has lost just one game with an above average eFG% and OREB%",
+           size = 2.75, fontface = "italic") +
+  annotate(geom = "curve", x = 0.585, y = 0.635, xend = 0.56, yend = 0.49,
+           lineend = "butt", curvature = 0.25,
+           arrow = arrow(length = unit(0.01, "npc"), type = "closed")) +
+  scale_x_continuous(labels = scales::percent) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_color_brewer(palette = "Set1", direction = -1) +
+  labs(title = "Duke men's basketball shooting and offensive rebounding",
+       subtitle = "Dashed lines show Duke averages | 2010-11 through 2020-21 seasons",
+       x = "Shooting (eFG%)",
+       y = "Offensive Rebounding (OREB%)",
+       color = "Result",
+       caption = "Chart: @jacklich10 | Data: sports-reference.com")
+```
+
+Duke has lost only one game in which they had an above average (relative to Duke) effective field goal percentage and above average offensive rebounding rate! The four factors are amazing *descriptive* measures, but can also be leveraged for *prediction*.
+
+Here is all of the four factor data in tabular form. Click on a column name to sort! Code for the table can be found in the source code.
+
+```{r reactable, echo=FALSE, layout="l-page"}
+# function for finding a team logo
+team_logo_url <- function(x) {
+  dictionary <- ncaahoopR::ncaa_colors %>% 
+    dplyr::left_join(ncaahoopR::dict %>% 
+                       dplyr::transmute(espn_name = ESPN, pbp_name = ESPN_PBP,
+                                        sref_name),
+                     by = "espn_name")
+  
+  find_url <- function(x) {
+    result <- dictionary %>% 
+      dplyr::filter(sref_name == x | ncaa_name == x | espn_name == x) %>% 
+      dplyr::pull(logo_url)
+    if (length(result) == 0) {
+      return("")
+    } else {
+      return(result)
+    }
+  }
+  result <- rep(NA, length(x))
+  for (i in 1:length(x)) {
+    result[i] <- find_url(x[i])
+  }
+  return(result)
+}
+
+# table of four factors using library(reactable)
+four_factors_unnest %>%
+  dplyr::mutate(logo = team_logo_url(opponent),
+                score = paste0(team_score, " - ", opp_score),
+                pt_diff = team_score - opp_score,
+                score = forcats::fct_reorder(score, pt_diff)) %>% 
+  dplyr::select(season, date, logo, opponent, result, score, dplyr::everything(), 
+                -c(team_score, opp_score, pt_diff)) %>%
+  reactable::reactable(
+    highlight = T,
+    defaultSortOrder = "desc",
+    defaultSorted = "date",
+    compact = T,
+    borderless = F,
+    striped = T,
+    fullWidth = F,
+    defaultColDef = reactable::colDef(
+      align = "center",
+      footerStyle = list(fontWeight = "bold")
+      # minWidth = 50
+    ),
+    theme = reactable::reactableTheme(
+      headerStyle = list(
+        "&:hover[aria-sort]" = list(background = "hsl(0, 0%, 96%)"),
+        "&[aria-sort='ascending'], &[aria-sort='descending']" = list(background = "hsl(0, 0%, 96%)"),
+        borderColor = "#555")
+    ),
+    columns = list(
+      season = reactable::colDef(name = "Season"),
+      date = reactable::colDef(name = "Date",
+                               width = 110,
+                               format = reactable::colFormat(date = T)),
+      logo = reactable::colDef(name = "",
+                               width = 45,
+                               cell = function(value) {
+                                 image <- shiny::img(src = value, height = "20px", width = "20px", alt = value, align = "center")
+                               }),
+      opponent = reactable::colDef(name = "Opponent",
+                                   width = 150),
+      result = reactable::colDef(name = "Result",
+                                 style = function(value) {
+                                   if (value == "W") {
+                                     color <- "#008000"
+                                   } else {
+                                     color <- "#e00000"
+                                   }
+                                   list(color = color, fontWeight = "bold")
+                                 },
+                                 width = 70),
+      score = reactable::colDef(name = "Score", footer = "Average"),
+      eff_fg_pct = reactable::colDef(name = "eFG%",
+                                     format = reactable::colFormat(percent = T),
+                                     class = "border-left",
+                                     footer = function(values) scales::percent(mean(values), accuracy = 0.1)
+                                     # style = function(value) {
+                                     #   normalized <- (value - min(four_factors_unnest$eff_fg_pct)) / (max(four_factors_unnest$eff_fg_pct) - min(four_factors_unnest$eff_fg_pct))
+                                     #   color <- rgb(colorRamp(c("#0089BA","#00B0A7"))(normalized), maxColorValue = 255)
+                                     #   list(background = color)}
+                                     ),
+      tov_pct = reactable::colDef(name = "TO%",
+                                  format = reactable::colFormat(percent = T),
+                                  footer = function(values) scales::percent(mean(values), accuracy = 0.1)),
+      oreb_pct = reactable::colDef(name = "OREB%",
+                                   format = reactable::colFormat(percent = T),
+                                   footer = function(values) scales::percent(mean(values), accuracy = 0.1)),
+      ft_rate = reactable::colDef(name = "FTA/FGA",
+                                  format = reactable::colFormat(percent = T),
+                                  footer = function(values) scales::percent(mean(values), accuracy = 0.1))
+    )
+  )
+```
+
+# Wrap-up
+
+Hopefully, this piece served as a helpful introduction into leveraging publicly available college basketball data from sports-reference.com into interesting visualizations and insights. Don't forget that while I chose to only scrape Duke basketball statistics, the functions we created can be easily modified to scrape other team's statistics (or many team's statistics at once). Happy R programming!
