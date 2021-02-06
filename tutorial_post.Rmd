@@ -354,7 +354,7 @@ four_factors_unnest %>%
 
 Duke has lost only one game in which they had an above average (relative to Duke) effective field goal percentage and above average offensive rebounding rate! The four factors are amazing *descriptive* measures, but can also be leveraged for *prediction*.
 
-Here is all of the four factor data in tabular form. Click on a column name to sort! Code for the table can be found in the source code.
+Here is all of the four factor data in tabular form. Click on a column name to sort! Code for the table can be found in the [source code](https://github.com/Duke-Sports-Analytics-Club/jacklich10-sports-ref-tutorial).
 
 ```{r reactable, echo=FALSE, layout="l-page"}
 # function for finding a team logo
